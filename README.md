@@ -60,6 +60,29 @@ Illicit nodes tend to cluster together, forming detectable patterns in the trans
 
 ![Graph Visualization](assets/graph_visualization.png)
 
+## Research extension
+
+The original notebooks and baseline classes are preserved. The research
+extension adds `src/data_utils.py`, `src/taf_gnn.py`, `src/temporal_model.py`,
+`src/fusion.py`, `src/losses.py`, `src/evaluation.py`, and the experiment
+runners. It uses train timesteps 1-28, validation 29-34, and untouched test
+timesteps 35-49. `--protocol inductive` filters future graph connections,
+whereas the default protocol intentionally reproduces transductive full-graph
+message passing.
+
+Install dependencies and run:
+
+```bash
+python -m src.baseline_experiments --data-root data/elliptic
+python -m src.run_experiments --data-root data/elliptic --output-root results
+python -m src.run_experiments --data-root data/elliptic --output-root results/inductive --protocol inductive
+```
+
+Metrics are computed from actual predictions and include ROC-AUC, PR-AUC,
+precision, recall, F1, MCC, balanced accuracy, false-positive rate, and the
+validation-selected threshold. See [REPORT.md](REPORT.md) for the audit,
+mathematical description, research positioning, and limitations.
+
 ## Project Structure
 
 ```
@@ -71,7 +94,16 @@ bitcoin-fraud-gnn/
 │   ├── 04_gat.ipynb                # Graph Attention Network
 │   └── 05_temporal_analysis.ipynb  # Temporal generalization analysis
 ├── src/
-│   └── models.py                   # Reusable GCN and GAT definitions
+│   ├── models.py                   # Original reusable GCN and GAT definitions
+│   ├── taf_gnn.py                  # Feature, graph, temporal, and fusion model
+│   ├── temporal_model.py           # GRU/LSTM encoder
+│   ├── fusion.py                   # Adaptive softmax fusion gate
+│   ├── losses.py                   # CE, weighted CE, and focal loss
+│   ├── evaluation.py               # Metrics and threshold selection
+│   ├── data_utils.py               # Metadata alignment and inductive edge filter
+│   ├── baseline_experiments.py     # RF/GCN/GAT common-protocol runner
+│   └── run_experiments.py          # TAF-GNN, ablations, and result artifacts
+├── app.py                          # Streamlit research interface
 ├── assets/                         # Plots and visualizations
 └── requirements.txt
 ```
@@ -96,6 +128,19 @@ source venv/bin/activate
 pip install -r requirements.txt
 jupyter lab
 ```
+
+### Streamlit research interface
+
+From the project root on Windows:
+
+```powershell
+streamlit run app.py
+```
+
+The interface uses cached local graph data and displays only genuine generated
+artifacts when they exist. TAF-GNN predictions, ablation results, fusion
+weights, and explainability outputs remain explicit unavailable states until
+the corresponding research experiments have produced them.
 
 ## Author
 

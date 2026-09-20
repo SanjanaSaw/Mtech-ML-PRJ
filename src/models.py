@@ -44,3 +44,8 @@ class GAT(torch.nn.Module):
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.conv3(x, edge_index)
         return x
+
+
+from .taf_gnn import TAFGNN
+
+__all__ = ["GCN", "GAT", "TAFGNN"]

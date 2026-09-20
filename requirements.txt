@@ -8,4 +8,5 @@ seaborn==0.13.2
 pyvis==0.3.2
 mlflow==3.11.1
 streamlit==1.56.0
+plotly>=5.24.0
 jupyter==1.1.1
