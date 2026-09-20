@@ -12,9 +12,8 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
 
-from .data_utils import load_elliptic, make_temporal_splits
+from .data_utils import load_elliptic, make_temporal_splits, validate_elliptic
 from .evaluation import binary_metrics, select_threshold
 from .models import GAT, GCN
 
@@ -59,13 +58,16 @@ def main():
     parser.add_argument("--epochs", type=int, default=100)
     args = parser.parse_args()
     data = load_elliptic(args.data_root)
+    validate_elliptic(data)
     masks = make_temporal_splits(data.timestep)
     rows = [run_rf(data, masks)]
     rows += [run_gnn(cls, data, masks, args.epochs) for cls in (GCN, GAT)]
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(rows).to_csv(output, index=False)
-    print(pd.DataFrame(rows).to_string(index=False))
+    results = pd.DataFrame(rows)
+    results.insert(0, "protocol", "train_1_28_validation_29_34_test_35_49")
+    results.to_csv(output, index=False)
+    print(results.to_string(index=False))
 
 
 if __name__ == "__main__":

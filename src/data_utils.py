@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Iterable
 
 import numpy as np
 import torch
@@ -29,6 +29,37 @@ class EllipticData:
     @property
     def labeled_mask(self) -> torch.Tensor:
         return self.y >= 0
+
+
+def validate_elliptic(data: EllipticData) -> dict[str, int]:
+    """Validate graph, metadata, labels, and feature dimensions before training."""
+    node_count = data.x.shape[0]
+    if data.x.ndim != 2:
+        raise ValueError(f"Expected a 2D feature matrix, got shape {tuple(data.x.shape)}.")
+    if data.edge_index.ndim != 2 or data.edge_index.shape[0] != 2:
+        raise ValueError(
+            f"Expected edge_index with shape [2, E], got {tuple(data.edge_index.shape)}."
+        )
+    if data.y.shape[0] != node_count or data.timestep.shape[0] != node_count:
+        raise ValueError("Node features, labels, and timesteps are not aligned.")
+    if len(data.tx_id) != node_count or len(set(map(str, data.tx_id))) != node_count:
+        raise ValueError("Transaction IDs are missing, duplicated, or misaligned.")
+    if data.edge_index.numel():
+        if int(data.edge_index.min()) < 0 or int(data.edge_index.max()) >= node_count:
+            raise ValueError("The edge list contains an endpoint outside the node range.")
+    if not bool(torch.isfinite(data.x).all()):
+        raise ValueError("Node features contain NaN or infinite values.")
+    if not bool(torch.isin(data.y, torch.tensor([-1, 0, 1])).all()):
+        raise ValueError("Labels must use -1=unknown, 0=licit, and 1=illicit.")
+    return {
+        "nodes": int(node_count),
+        "edges": int(data.edge_index.shape[1]),
+        "features": int(data.x.shape[1]),
+        "timesteps": int(data.timestep.max()),
+        "unknown": int((data.y == -1).sum()),
+        "licit": int((data.y == 0).sum()),
+        "illicit": int((data.y == 1).sum()),
+    }
 
 
 def _read_raw_metadata(root: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
@@ -67,6 +98,14 @@ def load_elliptic(root: str | Path = "data/elliptic") -> EllipticData:
         raise FileNotFoundError(f"Processed graph not found: {processed}")
     obj = torch.load(processed, map_location="cpu", weights_only=False)
     data = obj[0] if isinstance(obj, (list, tuple)) else obj
+    if isinstance(data, dict):
+        try:
+            from torch_geometric.data import Data
+        except ImportError as exc:
+            raise ImportError(
+                "torch-geometric is required to load the processed Elliptic graph."
+            ) from exc
+        data = Data(**data)
     tx_id, timestep, labels, feature_names = _read_raw_metadata(root)
     if data.x.shape[0] != len(tx_id):
         raise ValueError(
@@ -78,7 +117,7 @@ def load_elliptic(root: str | Path = "data/elliptic") -> EllipticData:
     graph_y = data.y.detach().cpu().numpy().astype(np.int64)
     if np.all(np.isin(graph_y, [0, 1, 2])):
         labels = np.where(graph_y == 0, -1, np.where(graph_y == 1, 1, 0))
-    return EllipticData(
+    result = EllipticData(
         x=data.x.detach().cpu().float(),
         edge_index=data.edge_index.detach().cpu().long(),
         y=torch.from_numpy(labels),
@@ -86,6 +125,8 @@ def load_elliptic(root: str | Path = "data/elliptic") -> EllipticData:
         tx_id=tx_id,
         feature_names=feature_names,
     )
+    validate_elliptic(result)
+    return result
 
 
 def make_temporal_splits(

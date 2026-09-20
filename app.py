@@ -14,10 +14,11 @@ from typing import Any
 
 # Keep the Windows MKL/OpenMP runtime from failing during PyTorch DLL
 # initialisation in the conda environment used by the notebooks.
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("MKL_THREADING_LAYER", "GNU")
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["MKL_THREADING_LAYER"] = "GNU"
 
+import torch
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -46,22 +47,30 @@ st.markdown(
     .stApp { background: radial-gradient(circle at 65% -10%, #17304a 0, #08101d 42%, #070c15 100%); color:var(--ink); }
     [data-testid="stSidebar"] { background:#0a1220; border-right:1px solid var(--line); }
     [data-testid="stSidebar"] * { color:var(--ink); }
+    [data-testid="stSidebar"] .stRadio label { padding:.28rem .35rem; border-radius:8px; }
+    [data-testid="stSidebar"] .stRadio label:hover { background:#14233a; }
+    [data-testid="stSidebar"] hr { border-color:var(--line); }
     h1,h2,h3 { font-family:'Space Grotesk', sans-serif; letter-spacing:-.03em; }
     h1 { font-size:2.55rem !important; margin-bottom:.15rem; }
-    h2 { margin-top:1.5rem; }
+    h2 { margin-top:1.55rem; }
+    h3 { margin-top:1.25rem; }
     .eyebrow { color:var(--accent); text-transform:uppercase; letter-spacing:.16em; font-size:.72rem; font-weight:700; }
     .subtle { color:var(--muted); font-size:.92rem; }
-    .hero { padding:1.4rem 1.65rem; border:1px solid #29415a; border-radius:18px; background:linear-gradient(135deg,rgba(24,48,72,.92),rgba(14,24,40,.88)); margin-bottom:1rem; }
-    .metric-card { background:rgba(17,26,42,.88); border:1px solid var(--line); border-radius:14px; padding:1rem 1.05rem; min-height:105px; }
+    .hero { padding:1.55rem 1.7rem; border:1px solid #29415a; border-radius:18px; background:linear-gradient(135deg,rgba(24,48,72,.92),rgba(14,24,40,.88)); margin-bottom:1rem; box-shadow:0 12px 35px rgba(0,0,0,.16); }
+    .metric-card { background:rgba(17,26,42,.88); border:1px solid var(--line); border-radius:14px; padding:1rem 1.05rem; min-height:105px; box-shadow:0 5px 18px rgba(0,0,0,.1); overflow:hidden; }
     .metric-label { color:var(--muted); font-size:.76rem; text-transform:uppercase; letter-spacing:.08em; }
-    .metric-value { color:var(--ink); font-family:'Space Grotesk'; font-weight:700; font-size:1.65rem; margin-top:.35rem; }
+    .metric-value { color:var(--ink); font-family:'Space Grotesk'; font-weight:700; font-size:1.65rem; margin-top:.35rem; overflow-wrap:anywhere; }
     .metric-note { color:var(--muted); font-size:.76rem; margin-top:.2rem; }
     .status { border-radius:999px; display:inline-block; padding:.22rem .65rem; font-size:.72rem; font-weight:700; }
     .status-green { color:#06251c; background:var(--accent); } .status-amber { color:#2d2107; background:var(--warn); }
     .status-muted { color:#b8c3d5; background:#24334c; }
     .empty { border:1px dashed #35506d; border-radius:14px; padding:1.25rem; color:var(--muted); background:rgba(13,24,39,.55); }
+    .empty b { color:var(--ink); font-size:1rem; }
     .source { color:#70819b; font-size:.75rem; border-top:1px solid var(--line); padding-top:.65rem; margin-top:1rem; }
     div[data-testid="stMetric"] { background:rgba(17,26,42,.7); border:1px solid var(--line); padding:12px; border-radius:12px; }
+    div[data-testid="stButton"] button, div[data-testid="stDownloadButton"] button { border-radius:9px; border:1px solid #38516b; }
+    div[data-testid="stTextInput"] input { border-radius:9px; }
+    .section-hint { color:var(--muted); font-size:.84rem; margin-top:-.55rem; margin-bottom:.7rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -118,6 +127,9 @@ def temporal_table() -> pd.DataFrame:
 
 def artifact_status() -> dict[str, bool]:
     return {
+        "Random Forest baseline": True,
+        "GCN baseline": True,
+        "GAT baseline": True,
         "TAF-GNN checkpoint": (ROOT / "models" / "taf_gnn_best.pt").exists(),
         "Model comparison": artifact("model_comparison.csv").exists(),
         "Ablation": artifact("ablation_results.csv").exists(),
@@ -140,8 +152,8 @@ def metric_card(label: str, value: str, note: str = "") -> None:
 
 
 def empty_state(title: str, detail: str, command: str | None = None) -> None:
-    extra = f"<br><code>{command}</code>" if command else ""
-    st.markdown(f'<div class="empty"><b>{title}</b><br>{detail}{extra}</div>', unsafe_allow_html=True)
+    extra = f'<div style="margin-top:.7rem"><code>{command}</code></div>' if command else ""
+    st.markdown(f'<div class="empty"><b>○ &nbsp;{title}</b><br>{detail}{extra}</div>', unsafe_allow_html=True)
 
 
 def historical_comparison() -> pd.DataFrame:
@@ -179,8 +191,35 @@ def overview() -> None:
         '<div class="subtle">A focused workspace for exploring transaction topology, temporal drift, and reproducible model evidence.</div></div>',
         unsafe_allow_html=True,
     )
-    st.info("Historical notebook figures and generated experiment artifacts are kept separate. No live blockchain feed is connected.")
+    st.info("Historical notebook figures and generated experiment artifacts are kept separate. No live blockchain feed is connected.", icon="ℹ️")
+    with st.expander("New here? Start with these three steps", expanded=False):
+        st.markdown("1. **Scan the overview** for the processed graph profile and chronological split.\n"
+                    "2. **Open Transaction explorer** to inspect a real transaction ID and its one-hop context.\n"
+                    "3. **Use Research outputs** only when generated CSV artifacts are available; missing outputs stay clearly marked.")
     summary = graph_summary()
+    protocol_left, protocol_right = st.columns([1.2, 1])
+    with protocol_left:
+        st.markdown("#### Research protocol")
+        st.caption("Chronological evaluation prevents future periods from selecting the operating threshold.")
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    "Role": ["Training", "Validation", "Testing"],
+                    "Timesteps": ["1–28", "29–34", "35–49"],
+                    "Purpose": ["Fit parameters", "Select threshold", "Final report"],
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    with protocol_right:
+        st.markdown("#### Evidence policy")
+        st.info(
+            "Graph metrics are computed from the processed dataset. "
+            "Model metrics are labeled historical or generated. "
+            "Future TAF-GNN outputs are never simulated.",
+            icon="🔎",
+        )
     cols = st.columns(4)
     for col, label, value, note in zip(
         cols,
@@ -191,6 +230,7 @@ def overview() -> None:
         with col:
             metric_card(label, value, note)
     st.subheader("Dataset profile")
+    st.markdown('<div class="section-hint">All figures below are calculated from the processed Elliptic graph.</div>', unsafe_allow_html=True)
     left, middle, right = st.columns([1, 1, 1])
     labels = pd.DataFrame({"Class": ["Licit", "Illicit", "Unknown"], "Transactions": [summary["licit"], summary["illicit"], summary["nodes"] - summary["labeled"]]})
     with left:
@@ -218,6 +258,17 @@ def overview() -> None:
         image = ROOT / "assets" / "class_distribution.png"
         if image.exists():
             st.image(str(image), use_container_width=True, caption="Repository class distribution reference")
+    st.subheader("Research status")
+    st.caption("Baseline evidence is available from the repository; extension artifacts appear only after experiments are run.")
+    status_cols = st.columns(4)
+    degree = summary["degree"].numpy()
+    for col, label, value in zip(
+        status_cols,
+        ["Average degree", "Median degree", "Maximum degree", "Unknown labels"],
+        [degree.mean(), np.median(degree), degree.max(), summary["nodes"] - summary["labeled"]],
+    ):
+        with col:
+            metric_card(label, f"{value:.1f}" if label != "Unknown labels" else f"{int(value):,}", "Computed from graph")
     st.subheader("Train / validation / test timeline")
     timeline = pd.DataFrame({"Split": ["Train", "Validation", "Test"], "Start": [1, 29, 35], "End": [28, 34, 49]})
     fig = go.Figure()
@@ -234,7 +285,7 @@ def overview() -> None:
 
 
 def transaction_analysis() -> None:
-    app_header("INVESTIGATION", "Transaction analysis", "Inspect a node, its provenance, and its local graph context.")
+    app_header("INVESTIGATION", "Transaction explorer", "Inspect a real node, its provenance, and its local graph context.")
     data = load_graph()
     from src.data_utils import node_degrees
 
@@ -243,13 +294,13 @@ def transaction_analysis() -> None:
         st.session_state.selected_tx = ids[0]
     controls = st.columns([3, 1, 1])
     with controls[0]:
-        query = st.text_input("Search transaction ID", value=st.session_state.selected_tx, placeholder="Paste a txId…")
+        query = st.text_input("Transaction ID", value=st.session_state.selected_tx, placeholder="Paste an exact txId…", help="Search is exact and uses IDs from the processed Elliptic graph.")
     with controls[1]:
-        if st.button("Random", use_container_width=True):
+        if st.button("Random node", use_container_width=True, help="Select a real transaction from the processed graph."):
             st.session_state.selected_tx = str(np.random.default_rng().choice(ids))
             st.rerun()
     with controls[2]:
-        if st.button("Clear", use_container_width=True):
+        if st.button("Clear", use_container_width=True, help="Clear the search field."):
             st.session_state.selected_tx = ""
             st.rerun()
     matches = np.flatnonzero(ids == query.strip())
@@ -318,7 +369,8 @@ def graph_explorer() -> None:
     if selected not in set(ids):
         selected = ids[0]
     idx = int(np.flatnonzero(ids == selected)[0])
-    radius = st.slider("Neighborhood size", 5, 50, 20)
+    radius = st.slider("Visible neighbors", 5, 50, 20, help="Limit the local graph to keep the interactive view readable.")
+    st.caption("The selected transaction is highlighted in the network. Colors represent repository labels; unknown labels are not predictions.")
     src, dst = data.edge_index
     incident_mask = (src == idx) | (dst == idx)
     incident = np.concatenate([src[incident_mask].numpy(), dst[incident_mask].numpy()])
@@ -365,7 +417,7 @@ def temporal_analysis() -> None:
         if len(numeric) > 1:
             st.line_chart(result.set_index(result.columns[0])[list(numeric)[:4]])
     else:
-        empty_state("Generated temporal results are not available", "The repository includes the original analysis image, but no current temporal_results.csv.", "python -m src.run_experiments --data-root data/elliptic --output-root results")
+        empty_state("Generated temporal results are not available", "The repository includes the original analysis image, but no current temporal_results.csv. The historical image below is reference material, not a fresh run.", "python -m src.run_experiments --data-root data/elliptic --output-root results")
         image = ROOT / "assets" / "temporal_analysis.png"
         if image.exists(): st.image(str(image), use_container_width=True, caption="Historical notebook analysis")
 
@@ -388,6 +440,26 @@ def model_comparison() -> None:
         chart = px.bar(display, x=name_col, y=metric, color=name_col, template="plotly_dark", color_discrete_sequence=["#63e6be", "#7aa2f7", "#ffcc66"])
         chart.update_layout(showlegend=False, yaxis_title=metric, margin=dict(l=10,r=10,t=20,b=10))
         st.plotly_chart(chart, use_container_width=True)
+    predictions = load_result("taf_gnn_predictions.csv")
+    if predictions is not None and {"y_true", "probability"}.issubset(predictions.columns):
+        st.markdown("#### Alert-budget view")
+        st.caption("Operational view computed from saved predictions; this is not shown when predictions are unavailable.")
+        y_true = predictions["y_true"].astype(int).to_numpy()
+        probability = predictions["probability"].astype(float).to_numpy()
+        rows = []
+        for fraction in (0.01, 0.05, 0.10):
+            count = max(1, int(len(probability) * fraction))
+            top = np.argsort(-probability)[:count]
+            rows.append(
+                {
+                    "Review budget": f"Top {fraction:.0%}",
+                    "Alerts": count,
+                    "Illicit found": int(y_true[top].sum()),
+                    "Precision": float(y_true[top].mean()),
+                    "Recall": float(y_true[top].sum() / max(y_true.sum(), 1)),
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def research_page(title: str, filename: str, command: str) -> None:
@@ -424,29 +496,32 @@ def download_center() -> None:
 
 
 def main() -> None:
-    if "page" not in st.session_state: st.session_state.page = "Overview"
+    pages = ["Overview", "Transaction explorer", "Graph explorer", "Temporal analysis", "Model comparison", "Ablation study", "Explainability", "Downloads"]
+    if st.session_state.get("page") not in pages:
+        st.session_state.page = "Overview"
     with st.sidebar:
         st.markdown("## ₿ Elliptic Sentinel")
-        st.caption("Fraud research console")
+        st.caption("Fraud research console · viva-ready workspace")
         st.divider()
-        page = st.radio("Workspace", ["Overview", "Transaction analysis", "Graph explorer", "Temporal analysis", "Model comparison", "Ablation", "Explainability", "Download center"], index=["Overview", "Transaction analysis", "Graph explorer", "Temporal analysis", "Model comparison", "Ablation", "Explainability", "Download center"].index(st.session_state.page))
+        page = st.radio("Navigate", pages, index=pages.index(st.session_state.page), help="Choose a view. Each page uses only repository data or clearly labelled historical evidence.")
         st.session_state.page = page
         st.divider()
         status = artifact_status()
         st.markdown('<span class="status status-green">● DATASET READY</span>', unsafe_allow_html=True)
-        st.caption("Static Ellipt dataset · no live feed")
-        demo_mode = st.toggle("Demo mode", value=True, help="Keep unavailable research outputs as explicit empty states. No values are simulated.")
+        st.caption("Static Elliptic dataset · no live feed")
+        demo_mode = st.toggle("Presentation-safe mode", value=True, help="Keep unavailable research outputs as explicit empty states. No values are simulated.")
         st.session_state.demo_mode = demo_mode
-        st.markdown("**Project status**")
-        for name, ready in status.items():
-            badge = "READY" if ready else "NOT FOUND"
-            cls = "status-green" if ready else "status-muted"
-            st.markdown(f'<span class="status {cls}">{badge}</span> {name}', unsafe_allow_html=True)
+        with st.expander("Artifact status", expanded=False):
+            st.caption("Generated files are detected locally; nothing is inferred.")
+            for name, ready in status.items():
+                badge = "READY" if ready else "NOT FOUND"
+                cls = "status-green" if ready else "status-muted"
+                st.markdown(f'<span class="status {cls}">{badge}</span> {name}', unsafe_allow_html=True)
     routes = {
-        "Overview": overview, "Transaction analysis": transaction_analysis, "Graph explorer": graph_explorer,
+        "Overview": overview, "Transaction explorer": transaction_analysis, "Graph explorer": graph_explorer,
         "Temporal analysis": temporal_analysis, "Model comparison": model_comparison,
-        "Ablation": lambda: research_page("Ablation study", "ablation_results.csv", "python -m src.run_experiments --data-root data/elliptic --output-root results"),
-        "Explainability": explainability, "Download center": download_center,
+        "Ablation study": lambda: research_page("Ablation study", "ablation_results.csv", "python -m src.run_experiments --data-root data/elliptic --output-root results"),
+        "Explainability": explainability, "Downloads": download_center,
     }
     routes[page]()
 

@@ -117,6 +117,9 @@ bitcoin-fraud-gnn/
   giving artificially inflated results
 - Model performance degrades on later test timesteps, pointing to continual
   learning as a necessary next step for production fraud detection
+- The reproducible experiment runner uses train timesteps 1-28, validation
+  timesteps 29-34, and test timesteps 35-49; thresholds are selected on
+  validation data only
 
 ## How to Run
 
@@ -141,6 +144,18 @@ The interface uses cached local graph data and displays only genuine generated
 artifacts when they exist. TAF-GNN predictions, ablation results, fusion
 weights, and explainability outputs remain explicit unavailable states until
 the corresponding research experiments have produced them.
+
+### Reproducible baseline experiments
+
+The common evaluation runner uses the chronological protocol shown in the UI:
+
+```powershell
+python -m src.baseline_experiments --data-root data/elliptic --output results/model_comparison.csv
+```
+
+It trains on timesteps 1-28, selects the threshold on 29-34, and reports the
+final metrics on 35-49. On Windows, keep the MKL/OpenMP settings used by
+`app.py` if PyTorch reports a `c10.dll` initialization error.
 
 ## Author
 

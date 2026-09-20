@@ -22,6 +22,10 @@ from sklearn.metrics import (
 
 
 def select_threshold(y_true: np.ndarray, probability: np.ndarray) -> float:
+    y_true = np.asarray(y_true).astype(int)
+    probability = np.asarray(probability)
+    if len(y_true) == 0 or len(np.unique(y_true)) < 2:
+        return 0.5
     precision, recall, thresholds = precision_recall_curve(y_true, probability)
     if not len(thresholds):
         return 0.5
@@ -36,7 +40,7 @@ def binary_metrics(y_true: np.ndarray, probability: np.ndarray, threshold: float
     tn, fp, fn, tp = confusion_matrix(y_true, predicted, labels=[0, 1]).ravel()
     return {
         "ROC-AUC": roc_auc_score(y_true, probability) if len(np.unique(y_true)) > 1 else np.nan,
-        "PR-AUC": average_precision_score(y_true, probability) if y_true.sum() else np.nan,
+        "PR-AUC": average_precision_score(y_true, probability) if len(y_true) else np.nan,
         "Precision": precision_score(y_true, predicted, zero_division=0),
         "Recall": recall_score(y_true, predicted, zero_division=0),
         "F1": f1_score(y_true, predicted, zero_division=0),
@@ -77,4 +81,3 @@ def save_predictions(
         "tx_id": tx_id, "timestep": timestep, "y_true": y_true,
         "probability": probability, "prediction": probability >= threshold,
     }).to_csv(path, index=False)
-
