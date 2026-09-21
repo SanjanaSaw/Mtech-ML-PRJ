@@ -10,3 +10,4 @@ mlflow==3.11.1
 streamlit==1.56.0
 plotly>=5.24.0
 jupyter==1.1.1
+pytest>=9.0.0

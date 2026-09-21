@@ -75,6 +75,7 @@ Install dependencies and run:
 ```bash
 python -m src.baseline_experiments --data-root data/elliptic
 python -m src.run_experiments --data-root data/elliptic --output-root results
+python -m src.run_experiments --data-root data/elliptic --output-root results --seeds 42,123,2024
 python -m src.run_experiments --data-root data/elliptic --output-root results/inductive --protocol inductive
 ```
 
@@ -82,6 +83,10 @@ Metrics are computed from actual predictions and include ROC-AUC, PR-AUC,
 precision, recall, F1, MCC, balanced accuracy, false-positive rate, and the
 validation-selected threshold. See [REPORT.md](REPORT.md) for the audit,
 mathematical description, research positioning, and limitations.
+Repeated-seed runs write per-seed artifacts under `results/seeds/seed_<seed>/`
+and aggregate model metrics (mean, standard deviation, and 95% confidence
+interval) into the top-level comparison and ablation CSV files. The first
+seed also retains the traditional single-seed artifact names.
 
 ## Project Structure
 

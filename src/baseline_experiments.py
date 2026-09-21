@@ -7,10 +7,16 @@ same 1-28/29-34/35-49 protocol and validation threshold selection.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("MKL_THREADING_LAYER", "GNU")
+
+import torch
 import numpy as np
 import pandas as pd
-import torch
 from sklearn.ensemble import RandomForestClassifier
 
 from .data_utils import load_elliptic, make_temporal_splits, validate_elliptic
@@ -56,11 +62,12 @@ def main():
     parser.add_argument("--data-root", default="data/elliptic")
     parser.add_argument("--output", default="results/model_comparison.csv")
     parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--trees", type=int, default=300)
     args = parser.parse_args()
     data = load_elliptic(args.data_root)
     validate_elliptic(data)
     masks = make_temporal_splits(data.timestep)
-    rows = [run_rf(data, masks)]
+    rows = [run_rf(data, masks, trees=args.trees)]
     rows += [run_gnn(cls, data, masks, args.epochs) for cls in (GCN, GAT)]
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

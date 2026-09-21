@@ -1,20 +1,27 @@
 """Reproducible training/evaluation entry point for the research experiments.
 
 Example:
-    python -m src.run_experiments --data-root data/elliptic --epochs 50
+    python -m src.run_experiments --data-root data/elliptic --epochs 50 --seeds 42,123,2024
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import math
+import os
 import random
+import shutil
 import time
 from pathlib import Path
 
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("MKL_THREADING_LAYER", "GNU")
+
+import torch
 import numpy as np
 import pandas as pd
-import torch
 import matplotlib.pyplot as plt
 from sklearn.metrics import PrecisionRecallDisplay, RocCurveDisplay, confusion_matrix
 
@@ -78,36 +85,28 @@ def train_variant(args, data, masks, variant, edge_index):
     threshold = select_threshold(y[known_val].cpu().numpy(), probability[known_val.cpu().numpy()])
     metrics = binary_metrics(y[known_test].cpu().numpy(), probability[known_test.cpu().numpy()], threshold)
     metrics.update({"Model": variant["name"], "training_seconds": time.perf_counter() - start,
+                    "runtime_seconds": time.perf_counter() - start,
                     "parameters": sum(p.numel() for p in model.parameters())})
     return model, output, probability, metrics, threshold, known_test.cpu().numpy()
 
 
-def main(args=None):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data-root", default="data/elliptic")
-    parser.add_argument("--output-root", default="results")
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--patience", type=int, default=15)
-    parser.add_argument("--hidden-dim", type=int, default=128)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--dropout", type=float, default=0.2)
-    parser.add_argument("--focal-gamma", type=float, default=2.0)
-    parser.add_argument("--graph-type", choices=["gcn", "gat"], default="gcn")
-    parser.add_argument("--temporal-type", choices=["gru", "lstm"], default="gru")
-    parser.add_argument("--device", default="")
-    parser.add_argument("--protocol", choices=["transductive", "inductive"], default="transductive")
-    parser.add_argument("--seed", type=int, default=42)
-    parsed = parser.parse_args(args)
-    seed_everything(parsed.seed)
-    data = load_elliptic(parsed.data_root)
-    masks = make_temporal_splits(data.timestep)
-    out = Path(parsed.output_root)
+def parse_seeds(value):
+    parts = value.split(",")
+    if any(not item.strip() for item in parts):
+        raise argparse.ArgumentTypeError("seeds must be comma-separated integers")
+    try:
+        seeds = [int(item.strip()) for item in parts]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("seeds must be comma-separated integers") from exc
+    if not seeds:
+        raise argparse.ArgumentTypeError("at least one seed is required")
+    return seeds
+
+
+def run_seed(args, data, masks, edge_index, out):
+    """Run the complete workflow once and write all artifacts for one seed."""
+    out.mkdir(parents=True, exist_ok=True)
     (out / "figures").mkdir(parents=True, exist_ok=True)
-    # The transductive protocol intentionally uses the complete graph.
-    edge_index = data.edge_index
-    if parsed.protocol == "inductive":
-        edge_index = filter_edges_by_time(edge_index, data.timestep, max_timestep=34)
     variants = [
         {"name": "M1 Feature-only", "graph": False, "temporal": False, "fusion": False, "loss": "cross_entropy"},
         {"name": "M2 Feature+Graph", "graph": True, "temporal": False, "fusion": False, "loss": "weighted_cross_entropy"},
@@ -116,19 +115,25 @@ def main(args=None):
         {"name": "M5 TAF-GNN+Focal", "graph": True, "temporal": True, "fusion": True, "loss": "focal"},
     ]
     rows, final = [], None
+    device_name = str(torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")))
+    protocol = args.protocol
     for variant in variants:
         model, output, probability, metrics, threshold, test_mask = train_variant(
-            parsed, data, masks, variant, edge_index
+            args, data, masks, variant, edge_index
         )
-        rows.append({k: metrics[k] for k in ["Model", "ROC-AUC", "PR-AUC", "Precision", "Recall", "F1", "MCC", "Balanced Accuracy", "False Positive Rate"]})
+        row = {k: metrics[k] for k in ["Model", "ROC-AUC", "PR-AUC", "Precision", "Recall", "F1",
+                                       "MCC", "Balanced Accuracy", "False Positive Rate"]}
+        row.update({"seed": args.seed, "runtime_seconds": metrics["runtime_seconds"],
+                    "parameters": metrics["parameters"], "protocol": protocol, "device": device_name})
+        rows.append(row)
         if variant["name"] == "M4 TAF-GNN":
             final = (model, output, probability, metrics, threshold, test_mask)
     if final is None:
         raise RuntimeError("TAF-GNN variant did not run.")
     model, output, probability, metrics, threshold, test_mask = final
-    out.mkdir(exist_ok=True)
-    pd.DataFrame(rows).to_csv(out / "ablation_results.csv", index=False)
-    pd.DataFrame(rows).to_csv(out / "model_comparison.csv", index=False)
+    rows_df = pd.DataFrame(rows)
+    rows_df.to_csv(out / "ablation_results.csv", index=False)
+    rows_df.to_csv(out / "model_comparison.csv", index=False)
     labeled_test = masks.test.numpy() & (data.y.numpy() >= 0)
     save_predictions(out / "taf_gnn_predictions.csv", data.tx_id[labeled_test], data.timestep.numpy()[labeled_test],
                      data.y.numpy()[labeled_test], probability[labeled_test], threshold)
@@ -144,11 +149,21 @@ def main(args=None):
     categories = np.where((pred_test == 1) & (y_test == 1), "true_positive",
                  np.where((pred_test == 1) & (y_test == 0), "false_positive",
                  np.where(y_test == 1, "false_negative", "true_negative")))
-    pd.DataFrame({
+    error_frame = pd.DataFrame({
         "tx_id": data.tx_id[labeled_test], "timestep": data.timestep.numpy()[labeled_test],
         "true_label": y_test, "predicted_probability": p_test,
         "predicted_label": pred_test, "error_category": categories,
-    }).to_csv(out / "error_analysis.csv", index=False)
+    })
+    error_frame.to_csv(out / "error_analysis.csv", index=False)
+    error_summary = (
+        error_frame.groupby(["timestep", "error_category"], as_index=False)
+        .agg(
+            transactions=("tx_id", "size"),
+            mean_probability=("predicted_probability", "mean"),
+        )
+        .sort_values(["timestep", "error_category"])
+    )
+    error_summary.to_csv(out / "error_analysis_summary.csv", index=False)
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
     RocCurveDisplay.from_predictions(y_test, p_test, ax=axes[0])
     PrecisionRecallDisplay.from_predictions(y_test, p_test, ax=axes[1])
@@ -175,9 +190,78 @@ def main(args=None):
     fig.tight_layout()
     fig.savefig(out / "figures/fusion_weights.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
-    Path("models").mkdir(exist_ok=True)
-    torch.save({"model_state_dict": model.state_dict(), "threshold": threshold, "config": vars(parsed)}, "models/taf_gnn_best.pt")
-    print(pd.DataFrame(rows).to_string(index=False))
+    model_path = out / "models" / "taf_gnn_best.pt"
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"model_state_dict": model.state_dict(), "threshold": threshold, "config": vars(args)}, model_path)
+    return rows_df, model_path
+
+
+def aggregate_results(per_seed_rows):
+    """Summarize each metric across seeds, including a normal-approximation CI."""
+    combined = pd.concat(per_seed_rows, ignore_index=True)
+    metric_columns = ["ROC-AUC", "PR-AUC", "Precision", "Recall", "F1", "MCC",
+                      "Balanced Accuracy", "False Positive Rate", "runtime_seconds", "parameters"]
+    rows = []
+    for model, group in combined.groupby("Model", sort=False):
+        row = {"Model": model, "protocol": group["protocol"].iloc[0],
+               "device": group["device"].iloc[0], "seeds": ",".join(map(str, group["seed"]))}
+        for metric in metric_columns:
+            values = pd.to_numeric(group[metric], errors="coerce").dropna().to_numpy()
+            mean = float(values.mean()) if len(values) else np.nan
+            std = float(values.std(ddof=1)) if len(values) > 1 else 0.0
+            ci = 1.96 * std / math.sqrt(len(values)) if len(values) > 1 else 0.0
+            row.update({f"{metric}_mean": mean, f"{metric}_std": std, f"{metric}_95%_CI": ci})
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def main(args=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-root", default="data/elliptic")
+    parser.add_argument("--output-root", default="results")
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--patience", type=int, default=15)
+    parser.add_argument("--hidden-dim", type=int, default=128)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--focal-gamma", type=float, default=2.0)
+    parser.add_argument("--graph-type", choices=["gcn", "gat"], default="gcn")
+    parser.add_argument("--temporal-type", choices=["gru", "lstm"], default="gru")
+    parser.add_argument("--device", default="")
+    parser.add_argument("--protocol", choices=["transductive", "inductive"], default="transductive")
+    parser.add_argument("--seeds", type=parse_seeds, default=[42],
+                        help="Comma-separated random seeds (default: 42)")
+    parser.add_argument("--seed", type=int, default=None, help=argparse.SUPPRESS)
+    parsed = parser.parse_args(args)
+    seeds = [parsed.seed] if parsed.seed is not None else parsed.seeds
+    data = load_elliptic(parsed.data_root)
+    masks = make_temporal_splits(data.timestep)
+    out = Path(parsed.output_root)
+    # The transductive protocol intentionally uses the complete graph.
+    edge_index = data.edge_index
+    if parsed.protocol == "inductive":
+        edge_index = filter_edges_by_time(edge_index, data.timestep, max_timestep=34)
+    out.mkdir(exist_ok=True)
+    per_seed_rows = []
+    for seed in seeds:
+        parsed.seed = seed
+        seed_everything(seed)
+        seed_out = out / "seeds" / f"seed_{seed}"
+        rows, model_path = run_seed(parsed, data, masks, edge_index, seed_out)
+        per_seed_rows.append(rows)
+        if seed == seeds[0]:
+            for source in seed_out.rglob("*"):
+                if source.is_file() and "models" not in source.parts:
+                    target = out / source.relative_to(seed_out)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+            Path("models").mkdir(exist_ok=True)
+            shutil.copy2(model_path, Path("models") / model_path.name)
+    aggregate = aggregate_results(per_seed_rows)
+    aggregate.to_csv(out / "ablation_results.csv", index=False)
+    aggregate.to_csv(out / "model_comparison.csv", index=False)
+    print(aggregate.to_string(index=False))
 
 
 if __name__ == "__main__":

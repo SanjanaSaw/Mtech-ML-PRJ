@@ -80,3 +80,54 @@ bounded permutation importance by default; GNNExplainer should be applied only
 to selected small neighborhoods. Results must be reported only after the
 actual commands complete, including device, runtime, parameter count, and
 failed experiments.
+
+## Generated experiment results
+
+The current generated artifacts were produced on CPU with two random seeds
+(42 and 123), a 32-dimensional hidden representation, two training epochs,
+and validation-only threshold selection. These settings are intentionally
+recorded because they are a quick reproducibility run, not a final
+hyperparameter-tuned claim.
+
+The transductive aggregate is stored in `results/model_comparison.csv`.
+For M4 TAF-GNN, the measured mean values across the two seeds were:
+
+| Metric | Mean | 95% CI half-width |
+|---|---:|---:|
+| ROC-AUC | 0.592 | 0.139 |
+| PR-AUC | 0.031 | 0.016 |
+| Precision | 0.037 | 0.033 |
+| Recall | 0.486 | 0.509 |
+| F1 | 0.064 | 0.046 |
+| MCC | 0.035 | 0.072 |
+
+The M4 model contained 24,997 trainable parameters and required approximately
+8.57 seconds per seed in this configuration. The wide intervals demonstrate
+why repeated seeds are necessary and why this quick run should not be
+presented as a definitive performance claim.
+
+Strict inductive evaluation was also completed under
+`results/inductive/model_comparison.csv`, filtering graph edges so future
+nodes could not receive messages through connections after timestep 34. The
+single-seed inductive M4 result was ROC-AUC 0.742, PR-AUC 0.048, precision
+0.058, recall 0.310, and F1 0.098. Since only seed 42 was used for the
+inductive smoke run, its confidence interval is zero and should not be
+interpreted as uncertainty.
+
+The generated artifact set includes:
+
+* `taf_gnn_predictions.csv` and `fusion_weights.csv`;
+* `ablation_results.csv` for feature-only, graph, temporal, adaptive-fusion,
+  and focal-loss variants;
+* `temporal_results.csv`;
+* `error_analysis.csv` plus the grouped
+  `error_analysis_summary.csv`;
+* ROC/PR, temporal-performance, and fusion-weight figures.
+
+The baseline runner also generated the standardized RF/GCN/GAT comparison in
+`results/model_comparison.csv` before the TAF-GNN aggregate was written. The
+TAF-GNN aggregate is now the canonical file at that path; the printed baseline
+run reported RF ROC-AUC 0.910 and PR-AUC 0.406, GCN ROC-AUC 0.628 and PR-AUC
+0.033, and GAT ROC-AUC 0.640 and PR-AUC 0.036. These baseline values used
+50 RF trees and five GNN epochs and should be regenerated with the desired
+compute budget for a final thesis table.
