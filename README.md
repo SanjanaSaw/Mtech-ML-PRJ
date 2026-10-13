@@ -162,7 +162,3 @@ It trains on timesteps 1-28, selects the threshold on 29-34, and reports the
 final metrics on 35-49. On Windows, keep the MKL/OpenMP settings used by
 `app.py` if PyTorch reports a `c10.dll` initialization error.
 
-## Author
-
-**Lino Vives** - Mathematics & Software Engineering student  
-[LinkedIn](https://linkedin.com/in/lino-vives)
