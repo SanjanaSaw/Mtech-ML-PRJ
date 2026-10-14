@@ -95,6 +95,9 @@ predictions, temporal plots, feature PSI, configurations, threshold
 recalibration, and (optionally) rolling-window metrics. The `--ablations` flag
 enables GCN depth, edge, feature-width, and feature-only controls. See
 [REPORT.md](REPORT.md) for protocol details and limitations.
+The recent-validation threshold strategy uses the final five validation
+timesteps; it never uses test labels. Rolling retraining may use labels from
+completed earlier periods, but excludes the period being predicted.
 
 ## Project Structure
 
@@ -113,7 +116,7 @@ bitcoin-fraud-gnn/
 │   ├── fusion.py                   # Adaptive softmax fusion gate
 │   ├── losses.py                   # CE, weighted CE, and focal loss
 │   ├── evaluation.py               # Metrics and threshold selection
-│   ├── data_utils.py               # Metadata alignment and inductive edge filter
+│   ├── data_utils.py               # Metadata alignment and visible temporal subgraphs
 │   ├── baseline_experiments.py     # RF/GCN/GAT common-protocol runner
 │   └── run_experiments.py          # TAF-GNN, ablations, and result artifacts
 ├── app.py                          # Streamlit research interface

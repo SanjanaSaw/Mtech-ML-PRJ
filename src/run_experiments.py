@@ -25,7 +25,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import PrecisionRecallDisplay, RocCurveDisplay, confusion_matrix
 
-from .data_utils import filter_edges_by_time, load_elliptic, make_temporal_splits
+from .data_utils import load_elliptic, make_temporal_splits, visible_temporal_subgraph
 from .evaluation import binary_metrics, save_predictions, select_threshold, temporal_metrics
 from .explainability import save_fusion_weights
 from .losses import build_loss
@@ -41,17 +41,13 @@ def seed_everything(seed: int) -> None:
 
 
 def _visible_graph(data, edge_index, cutoff, device):
-    visible_nodes = torch.where(data.timestep <= cutoff)[0]
-    global_to_local = torch.full(
-        (data.x.shape[0],), -1, dtype=torch.long
+    x, edges, timestep, visible_nodes, global_to_local = visible_temporal_subgraph(
+        data, edge_index, cutoff
     )
-    global_to_local[visible_nodes] = torch.arange(visible_nodes.numel())
-    visible_edges = filter_edges_by_time(edge_index, data.timestep, cutoff)
-    local_edges = global_to_local[visible_edges]
     return (
-        data.x[visible_nodes].to(device),
-        local_edges.to(device),
-        data.timestep[visible_nodes].to(device),
+        x.to(device),
+        edges.to(device),
+        timestep.to(device),
         visible_nodes,
         global_to_local,
     )

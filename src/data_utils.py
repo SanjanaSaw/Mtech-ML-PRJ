@@ -207,6 +207,24 @@ def filter_edges_by_time(
     return edge_index[:, keep]
 
 
+def visible_temporal_subgraph(
+    data: EllipticData, edge_index: torch.Tensor, cutoff: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compact the graph to nodes and edges available at a prediction cutoff."""
+    visible_nodes = torch.where(data.timestep <= cutoff)[0]
+    global_to_local = torch.full((data.x.shape[0],), -1, dtype=torch.long)
+    global_to_local[visible_nodes] = torch.arange(visible_nodes.numel())
+    visible_edges = filter_edges_by_time(edge_index, data.timestep, cutoff)
+    local_edges = global_to_local[visible_edges]
+    return (
+        data.x[visible_nodes],
+        local_edges,
+        data.timestep[visible_nodes],
+        visible_nodes,
+        global_to_local,
+    )
+
+
 def node_degrees(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
     """Return undirected degree, avoiding the old outgoing-only calculation."""
     src, dst = edge_index

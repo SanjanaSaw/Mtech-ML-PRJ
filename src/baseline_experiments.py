@@ -23,10 +23,10 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import confusion_matrix
 
 from .data_utils import (
-    filter_edges_by_time,
     load_elliptic,
     make_temporal_splits,
     validate_elliptic,
+    visible_temporal_subgraph,
 )
 from .evaluation import binary_metrics, select_threshold, temporal_metrics
 from .models import GAT, GCN
@@ -57,11 +57,15 @@ def _period_probabilities(model, data, edge_index, mask, protocol, feature_count
         return probability
     for step in torch.unique(data.timestep[mask], sorted=True).tolist():
         period_mask = mask & (data.timestep == step)
-        period_edges = filter_edges_by_time(edge_index, data.timestep, int(step))
+        x, period_edges, _, _, global_to_local = visible_temporal_subgraph(
+            data, edge_index, int(step)
+        )
+        current_nodes = torch.where(period_mask)[0]
+        local_nodes = global_to_local[current_nodes]
         with torch.no_grad():
-            logits = model(data.x[:, :feature_count], period_edges)
+            logits = model(x[:, :feature_count], period_edges)
             period_probability = torch.softmax(logits, dim=-1)[:, 1]
-        probability[period_mask.numpy()] = period_probability[period_mask].cpu().numpy()
+        probability[current_nodes.numpy()] = period_probability[local_nodes].cpu().numpy()
     return probability
 
 
@@ -98,22 +102,25 @@ def _fit_gnn(
         raise ValueError("Training period must contain both labelled classes.")
     if torch.unique(data.y[validation]).numel() != 2:
         raise ValueError("Validation period must contain both labelled classes.")
-    train_edges = (
-        filter_edges_by_time(edges, data.timestep, int(data.timestep[train].max()))
-        if protocol == "inductive"
-        else edges
-    )
+    if protocol == "inductive":
+        x, train_edges, _, _, global_to_local = visible_temporal_subgraph(
+            data, edges, int(data.timestep[train].max())
+        )
+        local_train = global_to_local[torch.where(train)[0]]
+    else:
+        x, train_edges = data.x, edges
+        local_train = torch.where(train)[0]
     class_counts = torch.bincount(data.y[train], minlength=2).float()
     class_weights = class_counts.sum() / class_counts.clamp_min(1)
     criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     best_score, best_state, best_epoch, patience_left = -np.inf, None, 0, patience
-    x = data.x[:, :feature_count]
+    x = x[:, :feature_count]
     for epoch in range(1, epochs + 1):
         model.train()
         optimizer.zero_grad()
         logits = model(x, train_edges)
-        loss = criterion(logits[train], data.y[train])
+        loss = criterion(logits[local_train], data.y[train])
         loss.backward()
         optimizer.step()
         model.eval()
@@ -215,21 +222,23 @@ def _recalibrated_threshold_rows(
     test_steps = data.timestep[test].numpy()
     test_y = data.y[test].numpy()
     test_p = test_probability[test.numpy()]
+    validation_steps = data.timestep[validation].numpy()
+    recent_validation = validation_steps >= validation_steps.max() - 4
+    recent_threshold = select_threshold(
+        validation_y[recent_validation], validation_p[recent_validation]
+    )
     rows = []
-    past_y, past_p = validation_y.copy(), validation_p.copy()
     for step in sorted(np.unique(test_steps)):
         current = test_steps == step
         for name, threshold in (
             ("validation_fixed", fixed_threshold),
-            ("historical_recalibration", select_threshold(past_y, past_p)),
+            ("recent_validation_window", recent_threshold),
         ):
             metrics = binary_metrics(test_y[current], test_p[current], threshold)
             rows.append({
                 "Model": model_name, "seed": seed, "timestep": int(step),
                 "strategy": name, **metrics,
             })
-        past_y = np.concatenate([past_y, test_y[current]])
-        past_p = np.concatenate([past_p, test_p[current]])
     return rows
 
 
@@ -254,29 +263,38 @@ def _rolling_predictions(
         model_cls = GCN if spec["type"] == "gcn" else GAT
         seed_everything(seed + step)
         model = model_cls(data.x.shape[1], args.hidden_dim, 2, num_layers=3).cpu()
-        edges = (
-            filter_edges_by_time(data.edge_index, data.timestep, step - 1)
-            if args.protocol == "inductive" else data.edge_index
-        )
+        if args.protocol == "inductive":
+            x, edges, _, _, global_to_local = visible_temporal_subgraph(
+                data, data.edge_index, step - 1
+            )
+            local_history = global_to_local[torch.where(history)[0]]
+        else:
+            x, edges = data.x, data.edge_index
+            local_history = torch.where(history)[0]
         counts = torch.bincount(data.y[history], minlength=2).float()
         criterion = torch.nn.CrossEntropyLoss(weight=counts.sum() / counts.clamp_min(1))
         optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
         for _ in range(max(1, selected_epochs)):
             model.train()
             optimizer.zero_grad()
-            loss = criterion(model(data.x, edges)[history], data.y[history])
+            loss = criterion(model(x, edges)[local_history], data.y[history])
             loss.backward()
             optimizer.step()
         model.eval()
-        period_edges = (
-            filter_edges_by_time(data.edge_index, data.timestep, step)
-            if args.protocol == "inductive" else data.edge_index
-        )
+        if args.protocol == "inductive":
+            x, period_edges, _, _, global_to_local = visible_temporal_subgraph(
+                data, data.edge_index, step
+            )
+            local_current = global_to_local[torch.where(current)[0]]
+        else:
+            x, period_edges = data.x, data.edge_index
+            local_current = torch.where(current)[0]
         with torch.no_grad():
-            logits = model(data.x, period_edges)
-            probability = torch.softmax(logits, dim=-1)[current, 1].cpu().numpy()
+            logits = model(x, period_edges)
+            probability = torch.softmax(logits, dim=-1)[local_current, 1].cpu().numpy()
     labels = data.y[current].numpy()
-    metrics = binary_metrics(labels, probability, fixed_threshold)
+    labeled = labels >= 0
+    metrics = binary_metrics(labels[labeled], probability[labeled], fixed_threshold)
     return {
         "Model": spec["name"], "seed": seed, "timestep": step,
         "training_nodes": int(history.sum()), "threshold": fixed_threshold,
@@ -568,9 +586,13 @@ def main(argv=None):
                 "illicit precision", "illicit recall", "illicit F1",
                 "ROC-AUC", "average precision", "Precision@100",
             ],
+            "threshold_recalibration": (
+                "The recent-validation strategy selects its threshold on the final "
+                "five validation timesteps; no test labels are used for thresholds."
+            ),
             "rolling_label_availability": (
-                "Labels from completed prior periods are assumed available; "
-                "the current prediction period is excluded."
+                "Labels from completed prior periods are assumed available for rolling "
+                "training; the current prediction period is excluded."
             ),
             "strict_graph_visibility": (
                 "Graph nodes and edges are restricted to endpoints at or before "
