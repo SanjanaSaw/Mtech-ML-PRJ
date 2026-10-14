@@ -31,6 +31,23 @@ class EllipticData:
         return self.y >= 0
 
 
+def _map_elliptic_labels(labels: Iterable[object]) -> np.ndarray:
+    label_map = {"unknown": -1, "1": 1, "2": 0}
+    normalized = [str(value).strip().lower() for value in labels]
+    unexpected = sorted(set(normalized) - set(label_map))
+    if unexpected:
+        raise ValueError(f"Unexpected Elliptic labels: {unexpected}.")
+    return np.asarray([label_map[value] for value in normalized], dtype=np.int64)
+
+
+def _map_pyg_labels(labels: np.ndarray) -> np.ndarray:
+    """Convert PyG's 0=licit, 1=illicit, 2=unknown convention."""
+    labels = np.asarray(labels, dtype=np.int64)
+    if np.all(np.isin(labels, [0, 1, 2])):
+        return np.where(labels == 2, -1, labels)
+    return labels
+
+
 def validate_elliptic(data: EllipticData) -> dict[str, int]:
     """Validate graph, metadata, labels, and feature dimensions before training."""
     node_count = data.x.shape[0]
@@ -42,6 +59,8 @@ def validate_elliptic(data: EllipticData) -> dict[str, int]:
         )
     if data.y.shape[0] != node_count or data.timestep.shape[0] != node_count:
         raise ValueError("Node features, labels, and timesteps are not aligned.")
+    if len(data.feature_names) != data.x.shape[1]:
+        raise ValueError("Feature names do not match the feature matrix width.")
     if len(data.tx_id) != node_count or len(set(map(str, data.tx_id))) != node_count:
         raise ValueError("Transaction IDs are missing, duplicated, or misaligned.")
     if data.edge_index.numel():
@@ -75,14 +94,20 @@ def _read_raw_metadata(root: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, 
     classes = pd.read_csv(classes_path)
     if classes.shape[1] < 2:
         classes = pd.read_csv(classes_path, header=None)
-    classes.columns = ["tx_id", "label"][: classes.shape[1]]
+    if classes.shape[1] != 2:
+        raise ValueError(
+            f"Expected transaction ID and label columns in {classes_path}, "
+            f"found {classes.shape[1]} columns."
+        )
+    classes.columns = ["tx_id", "label"]
     tx_id = features.iloc[:, 0].to_numpy()
     timestep = features.iloc[:, 1].astype(int).to_numpy()
     labels = classes.set_index(classes.columns[0]).reindex(tx_id).iloc[:, 0]
-    # PyG represents unknown/licit/illicit as 0/1/2. Internally use -1/0/1.
-    label_map = {"unknown": -1, "1": 1, "2": 0, 1: 1, 2: 0}
-    y = labels.map(lambda value: label_map.get(value, -1)).to_numpy(dtype=np.int64)
-    feature_names = [f"feature_{i}" for i in range(features.shape[1] - 2)]
+    if labels.isna().any():
+        missing = int(labels.isna().sum())
+        raise ValueError(f"{missing} feature transaction IDs have no class row.")
+    y = _map_elliptic_labels(labels)
+    feature_names = [f"feature_{i}" for i in range(1, features.shape[1] - 1)]
     return tx_id, timestep, y, feature_names
 
 
@@ -112,16 +137,26 @@ def load_elliptic(root: str | Path = "data/elliptic") -> EllipticData:
             f"Node/metadata mismatch: graph has {data.x.shape[0]} nodes, "
             f"raw features have {len(tx_id)} rows."
         )
-    # The standard Elliptic PyG object has labels 0=unknown, 1=illicit, 2=licit.
-    # Prefer its node ordering, while correcting the unknown convention.
+    graph_tx_id = getattr(data, "tx_id", None)
+    if graph_tx_id is not None:
+        graph_tx_id = np.asarray(graph_tx_id).astype(str)
+        if not np.array_equal(graph_tx_id, tx_id.astype(str)):
+            raise ValueError(
+                "Processed graph transaction order does not match the raw feature rows."
+            )
+    # The standard Elliptic PyG object has 0=licit, 1=illicit, 2=unknown.
+    # Check its labels against the raw ID-aligned class file before using either.
     graph_y = data.y.detach().cpu().numpy().astype(np.int64)
-    if np.all(np.isin(graph_y, [0, 1, 2])):
-        labels = np.where(graph_y == 0, -1, np.where(graph_y == 1, 1, 0))
+    aligned_graph_y = _map_pyg_labels(graph_y)
+    if not np.array_equal(aligned_graph_y, labels):
+        raise ValueError(
+            "Processed graph labels do not align with raw labels in transaction order."
+        )
     result = EllipticData(
         x=data.x.detach().cpu().float(),
         edge_index=data.edge_index.detach().cpu().long(),
         y=torch.from_numpy(labels),
-        timestep=torch.from_numpy(timestep).long(),
+        timestep=torch.tensor(timestep, dtype=torch.long),
         tx_id=tx_id,
         feature_names=feature_names,
     )
@@ -131,16 +166,25 @@ def load_elliptic(root: str | Path = "data/elliptic") -> EllipticData:
 
 def make_temporal_splits(
     timestep: torch.Tensor,
-    train_steps: Iterable[int] = range(1, 29),
-    validation_steps: Iterable[int] = range(29, 35),
+    train_steps: Iterable[int] = range(1, 25),
+    validation_steps: Iterable[int] = range(25, 35),
     test_steps: Iterable[int] = range(35, 50),
 ) -> TemporalSplits:
-    """Return node masks for a chronological train/validation/test protocol."""
-    train = torch.isin(timestep, torch.tensor(list(train_steps), dtype=timestep.dtype))
+    """Return disjoint masks for timesteps 1-24, 25-34, and 35-49 by default."""
+    train_steps = list(train_steps)
+    validation_steps = list(validation_steps)
+    test_steps = list(test_steps)
+    if (
+        set(train_steps) & set(validation_steps)
+        or set(train_steps) & set(test_steps)
+        or set(validation_steps) & set(test_steps)
+    ):
+        raise ValueError("Training, validation, and test timesteps must be disjoint.")
+    train = torch.isin(timestep, torch.tensor(train_steps, dtype=timestep.dtype))
     validation = torch.isin(
-        timestep, torch.tensor(list(validation_steps), dtype=timestep.dtype)
+        timestep, torch.tensor(validation_steps, dtype=timestep.dtype)
     )
-    test = torch.isin(timestep, torch.tensor(list(test_steps), dtype=timestep.dtype))
+    test = torch.isin(timestep, torch.tensor(test_steps, dtype=timestep.dtype))
     return TemporalSplits(train=train, validation=validation, test=test)
 
 

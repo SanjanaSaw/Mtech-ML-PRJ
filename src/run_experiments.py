@@ -40,6 +40,53 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _visible_graph(data, edge_index, cutoff, device):
+    visible_nodes = torch.where(data.timestep <= cutoff)[0]
+    global_to_local = torch.full(
+        (data.x.shape[0],), -1, dtype=torch.long
+    )
+    global_to_local[visible_nodes] = torch.arange(visible_nodes.numel())
+    visible_edges = filter_edges_by_time(edge_index, data.timestep, cutoff)
+    local_edges = global_to_local[visible_edges]
+    return (
+        data.x[visible_nodes].to(device),
+        local_edges.to(device),
+        data.timestep[visible_nodes].to(device),
+        visible_nodes,
+        global_to_local,
+    )
+
+
+def _predict_mask(model, data, edge_index, node_mask, protocol, device):
+    probability = np.full(data.y.shape[0], np.nan, dtype=np.float32)
+    fusion_weights = torch.full((data.x.shape[0], 3), float("nan"))
+    model.eval()
+    with torch.no_grad():
+        if protocol == "transductive":
+            output = model(
+                data.x.to(device), edge_index.to(device), data.timestep.to(device)
+            )
+            selected = node_mask.to(device)
+            probability[node_mask.cpu().numpy()] = (
+                torch.softmax(output["logits"], -1)[selected, 1].cpu().numpy()
+            )
+            if output["fusion_weights"].shape[-1] == 3:
+                fusion_weights[node_mask.cpu()] = output["fusion_weights"][selected].cpu()
+            return probability, fusion_weights
+        for step in torch.unique(data.timestep[node_mask.cpu()], sorted=True).tolist():
+            current = node_mask.cpu() & (data.timestep == step)
+            x, edges, timestep, visible_nodes, global_to_local = _visible_graph(
+                data, edge_index, int(step), device
+            )
+            output = model(x, edges, timestep)
+            local_nodes = global_to_local[torch.where(current)[0]].to(device)
+            values = torch.softmax(output["logits"], -1)[local_nodes, 1]
+            probability[current.numpy()] = values.cpu().numpy()
+            if output["fusion_weights"].shape[-1] == 3:
+                fusion_weights[current] = output["fusion_weights"][local_nodes].cpu()
+    return probability, fusion_weights
+
+
 def train_variant(args, data, masks, variant, edge_index):
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     model = TAFGNN(
@@ -47,28 +94,47 @@ def train_variant(args, data, masks, variant, edge_index):
         temporal_type=args.temporal_type, use_graph=variant["graph"],
         use_temporal=variant["temporal"], adaptive_fusion=variant["fusion"],
     ).to(device)
-    x, edges, timestep, y = data.x.to(device), edge_index.to(device), data.timestep.to(device), data.y.to(device)
+    y = data.y.to(device)
     train_mask, val_mask, test_mask = [m.to(device) for m in (masks.train, masks.validation, masks.test)]
     known_train = train_mask & (y >= 0)
     known_val = val_mask & (y >= 0)
     known_test = test_mask & (y >= 0)
+    if torch.unique(y[known_train]).numel() != 2:
+        raise ValueError("Training period must contain both labelled classes.")
+    if torch.unique(y[known_val]).numel() != 2:
+        raise ValueError("Validation period must contain both labelled classes.")
     counts = torch.bincount(y[known_train], minlength=2).float()
     weights = (counts.sum() / counts.clamp_min(1)).to(device)
     loss = build_loss(variant["loss"], weights, args.focal_gamma)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     best_score, best_state, patience_left = -np.inf, None, args.patience
     start = time.perf_counter()
+    if args.protocol == "inductive":
+        train_cutoff = int(data.timestep[masks.train].max())
+        x, edges, timestep, visible_nodes, global_to_local = _visible_graph(
+            data, edge_index, train_cutoff, device
+        )
+        local_train = global_to_local[torch.where(known_train.cpu())[0]].to(device)
+    else:
+        x, edges, timestep = (
+            data.x.to(device), edge_index.to(device), data.timestep.to(device)
+        )
+        visible_nodes = torch.arange(data.x.shape[0])
+        local_train = torch.where(known_train)[0]
     for _ in range(args.epochs):
         model.train()
         optimizer.zero_grad()
         output = model(x, edges, timestep)
-        loss_value = loss(output["logits"][known_train], y[known_train])
+        loss_value = loss(output["logits"][local_train], y[known_train])
         loss_value.backward()
         optimizer.step()
         model.eval()
-        with torch.no_grad():
-            probability = torch.softmax(model(x, edges, timestep)["logits"], -1)[:, 1]
-        val_score = float(binary_metrics(y[known_val].cpu().numpy(), probability[known_val].cpu().numpy())["PR-AUC"])
+        probability, _ = _predict_mask(
+            model, data, edge_index, known_val.cpu(), args.protocol, device
+        )
+        val_score = float(binary_metrics(
+            y[known_val].cpu().numpy(), probability[known_val.cpu().numpy()]
+        )["PR-AUC"])
         if val_score > best_score:
             best_score, best_state, patience_left = val_score, copy.deepcopy(model.state_dict()), args.patience
         else:
@@ -78,16 +144,21 @@ def train_variant(args, data, masks, variant, edge_index):
     if best_state is None:
         raise RuntimeError("No checkpoint was selected; validation labels may be empty.")
     model.load_state_dict(best_state)
-    model.eval()
-    with torch.no_grad():
-        output = model(x, edges, timestep)
-        probability = torch.softmax(output["logits"], -1)[:, 1].cpu().numpy()
-    threshold = select_threshold(y[known_val].cpu().numpy(), probability[known_val.cpu().numpy()])
+    validation_probability, _ = _predict_mask(
+        model, data, edge_index, known_val.cpu(), args.protocol, device
+    )
+    probability, fusion_weights = _predict_mask(
+        model, data, edge_index, known_test.cpu(), args.protocol, device
+    )
+    threshold = select_threshold(
+        y[known_val].cpu().numpy(),
+        validation_probability[known_val.cpu().numpy()],
+    )
     metrics = binary_metrics(y[known_test].cpu().numpy(), probability[known_test.cpu().numpy()], threshold)
     metrics.update({"Model": variant["name"], "training_seconds": time.perf_counter() - start,
                     "runtime_seconds": time.perf_counter() - start,
                     "parameters": sum(p.numel() for p in model.parameters())})
-    return model, output, probability, metrics, threshold, known_test.cpu().numpy()
+    return model, {"fusion_weights": fusion_weights}, probability, metrics, threshold, known_test.cpu().numpy()
 
 
 def parse_seeds(value):
@@ -121,8 +192,11 @@ def run_seed(args, data, masks, edge_index, out):
         model, output, probability, metrics, threshold, test_mask = train_variant(
             args, data, masks, variant, edge_index
         )
-        row = {k: metrics[k] for k in ["Model", "ROC-AUC", "PR-AUC", "Precision", "Recall", "F1",
-                                       "MCC", "Balanced Accuracy", "False Positive Rate"]}
+        row = {k: metrics[k] for k in [
+            "Model", "ROC-AUC", "PR-AUC", "Precision", "Recall", "F1",
+            "MCC", "Balanced Accuracy", "False Positive Rate",
+            "TN", "FP", "FN", "TP", "threshold",
+        ]}
         row.update({"seed": args.seed, "runtime_seconds": metrics["runtime_seconds"],
                     "parameters": metrics["parameters"], "protocol": protocol, "device": device_name})
         rows.append(row)
@@ -134,6 +208,9 @@ def run_seed(args, data, masks, edge_index, out):
     rows_df = pd.DataFrame(rows)
     rows_df.to_csv(out / "ablation_results.csv", index=False)
     rows_df.to_csv(out / "model_comparison.csv", index=False)
+    rows_df[["Model", "seed", "protocol", "threshold", "TN", "FP", "FN", "TP"]].to_csv(
+        out / "confusion_matrices.csv", index=False
+    )
     labeled_test = masks.test.numpy() & (data.y.numpy() >= 0)
     save_predictions(out / "taf_gnn_predictions.csv", data.tx_id[labeled_test], data.timestep.numpy()[labeled_test],
                      data.y.numpy()[labeled_test], probability[labeled_test], threshold)
@@ -142,7 +219,11 @@ def run_seed(args, data, masks, edge_index, out):
         data.timestep.numpy()[labeled_test], threshold
     )
     temporal_df.to_csv(out / "temporal_results.csv", index=False)
-    save_fusion_weights(out / "fusion_weights.csv", data.tx_id, data.timestep.numpy(), output["fusion_weights"])
+    test_weights = output["fusion_weights"][labeled_test]
+    save_fusion_weights(
+        out / "fusion_weights.csv", data.tx_id[labeled_test],
+        data.timestep.numpy()[labeled_test], test_weights,
+    )
     y_test = data.y.numpy()[labeled_test]
     p_test = probability[labeled_test]
     pred_test = (p_test >= threshold).astype(int)
@@ -182,7 +263,7 @@ def run_seed(args, data, masks, edge_index, out):
     fig.tight_layout()
     fig.savefig(out / "figures/temporal_performance.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
-    weights = output["fusion_weights"].detach().cpu().numpy()
+    weights = test_weights.detach().cpu().numpy()
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.bar(["Features", "Graph", "Temporal"], weights.mean(axis=0))
     ax.set_title("Mean TAF-GNN Fusion Weights")
@@ -208,8 +289,8 @@ def aggregate_results(per_seed_rows):
         for metric in metric_columns:
             values = pd.to_numeric(group[metric], errors="coerce").dropna().to_numpy()
             mean = float(values.mean()) if len(values) else np.nan
-            std = float(values.std(ddof=1)) if len(values) > 1 else 0.0
-            ci = 1.96 * std / math.sqrt(len(values)) if len(values) > 1 else 0.0
+            std = float(values.std(ddof=1)) if len(values) > 1 else np.nan
+            ci = 1.96 * std / math.sqrt(len(values)) if len(values) > 1 else np.nan
             row.update({f"{metric}_mean": mean, f"{metric}_std": std, f"{metric}_95%_CI": ci})
         rows.append(row)
     return pd.DataFrame(rows)
@@ -230,18 +311,17 @@ def main(args=None):
     parser.add_argument("--temporal-type", choices=["gru", "lstm"], default="gru")
     parser.add_argument("--device", default="")
     parser.add_argument("--protocol", choices=["transductive", "inductive"], default="transductive")
-    parser.add_argument("--seeds", type=parse_seeds, default=[42],
-                        help="Comma-separated random seeds (default: 42)")
+    parser.add_argument("--seeds", type=parse_seeds, default=[42, 123, 2024, 2025, 2026],
+                        help="Comma-separated random seeds (default: five seeds)")
     parser.add_argument("--seed", type=int, default=None, help=argparse.SUPPRESS)
     parsed = parser.parse_args(args)
     seeds = [parsed.seed] if parsed.seed is not None else parsed.seeds
     data = load_elliptic(parsed.data_root)
     masks = make_temporal_splits(data.timestep)
     out = Path(parsed.output_root)
-    # The transductive protocol intentionally uses the complete graph.
+    # Visibility is applied at each model call; strict evaluation advances the
+    # available graph cutoff to the current prediction timestep.
     edge_index = data.edge_index
-    if parsed.protocol == "inductive":
-        edge_index = filter_edges_by_time(edge_index, data.timestep, max_timestep=34)
     out.mkdir(exist_ok=True)
     per_seed_rows = []
     for seed in seeds:

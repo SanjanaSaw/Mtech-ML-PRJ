@@ -5,14 +5,14 @@ Detecting illicit transactions in the Bitcoin network using GNNs on the Elliptic
 ![Python](https://img.shields.io/badge/Python-3.10+-blue)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.11-orange)
 ![PyG](https://img.shields.io/badge/PyG-2.7-red)
-![CUDA](https://img.shields.io/badge/CUDA-enabled-green)
+![CPU](https://img.shields.io/badge/CPU-supported-green)
 
-## The Problem
+## Research objective
 
-Financial fraud costs billions annually. Rule-based systems generate 95%+ false positives,
-wasting investigator time. Graph Neural Networks detect fraud patterns invisible to 
-per-transaction models - illicit transactions cluster in the payment network in ways 
-that only emerge when you look at the graph structure.
+This project tests whether graph structure improves illicit-transaction detection,
+how performance changes under temporal distribution shift, and whether stricter
+evaluation or mitigation improves reliability. These are hypotheses to test;
+the repository does not treat prior notebook metrics as findings.
 
 ## Dataset
 
@@ -21,42 +21,48 @@ contains 203,769 Bitcoin transactions and 234,355 payment flows, with 2% labeled
 
 ![Class Distribution](assets/class_distribution.png)
 
-## Approach
+## Evaluation protocol
 
-Three models trained on timesteps 1-34 and evaluated on 35-49 (temporal split):
+The reproducible runners use the same chronological split for labelled nodes:
 
-| Model | AUC | Illicit Recall | Illicit Precision |
-|-------|-----|---------------|-------------------|
-| Random Forest (baseline) | 0.95 | 11% | 74% |
-| GCN | 0.80 | 41% | 13% |
-| GAT | 0.82 | 43% | 12% |
+| Split | Timesteps | Use |
+|---|---:|---|
+| Training | 1–24 | Fit model parameters |
+| Validation | 25–34 | Select checkpoints and operating thresholds |
+| Testing | 35–49 | Final evaluation only |
 
-**Key result:** GNNs detect 4x more fraud than the tabular baseline, 
-at the cost of more false positives - the right trade-off when missing 
-fraud is more costly than investigating alerts.
+Unknown labels are excluded from supervised loss and labelled metrics. Internal
+labels are `-1=unknown`, `0=licit`, and `1=illicit`. Test labels do not select
+epochs, hyperparameters, or thresholds.
+
+The original notebooks contain historical experiments with different splits;
+their saved scores and plots are exploratory artifacts, not comparable results
+under this protocol.
 
 ## Temporal Analysis
 
-Fraud is not static. The dataset spans 49 timesteps (~2 weeks each), 
-and fraud rate oscillates between 0% and 35% depending on the period.
-Model performance degrades on later timesteps, confirming that fraud 
-patterns evolve over time and static models have fundamental limitations.
+The dataset spans 49 time steps. The experiment runner writes per-time-step
+ROC-AUC, PR-AUC, precision, and illicit-class recall, alongside transaction
+counts, labelled illicit proportions, and feature PSI relative to training.
+Any observed degradation—including around timestep 44—must be interpreted
+from generated results; the project does not attribute it to a cause without
+independent evidence.
 
 ![Temporal Analysis](assets/temporal_analysis.png)
 ![Temporal Generalization](assets/temporal_generalization.png)
 
 ## Graph Structure
 
-The network follows a power-law degree distribution typical of real-world graphs.
-Illicit nodes have slightly lower average degree (0.74) than licit ones (1.15),
-suggesting fraudulent transactions avoid highly connected nodes.
+The graph image is an existing exploratory artifact and is not evidence for a
+causal or predictive claim.
 
 ![Graph Structure](assets/graph_structure.png)
 
 ## Graph Visualization
 
 1-hop neighborhood around illicit nodes (timestep 5). Red = illicit, green = licit, gray = unknown.
-Illicit nodes tend to cluster together, forming detectable patterns in the transaction network.
+Treat this existing visualization as exploratory rather than as evidence that
+illicit nodes cluster or that graph structure improves prediction.
 
 ![Graph Visualization](assets/graph_visualization.png)
 
@@ -65,28 +71,30 @@ Illicit nodes tend to cluster together, forming detectable patterns in the trans
 The original notebooks and baseline classes are preserved. The research
 extension adds `src/data_utils.py`, `src/taf_gnn.py`, `src/temporal_model.py`,
 `src/fusion.py`, `src/losses.py`, `src/evaluation.py`, and the experiment
-runners. It uses train timesteps 1-28, validation 29-34, and untouched test
-timesteps 35-49. `--protocol inductive` filters future graph connections,
-whereas the default protocol intentionally reproduces transductive full-graph
-message passing.
+runners. It uses train timesteps 1–24, validation 25–34, and test timesteps
+35–49. `--protocol transductive` intentionally exposes the complete graph,
+including future nodes and edges. `--protocol inductive` exposes only nodes
+and edges whose endpoints are at or before each prediction timestep.
 
 Install dependencies and run:
 
 ```bash
-python -m src.baseline_experiments --data-root data/elliptic
-python -m src.run_experiments --data-root data/elliptic --output-root results
-python -m src.run_experiments --data-root data/elliptic --output-root results --seeds 42,123,2024
-python -m src.run_experiments --data-root data/elliptic --output-root results/inductive --protocol inductive
+python -m src.baseline_experiments --data-root data/elliptic --output results/baselines/model_comparison.csv --protocol transductive
+python -m src.baseline_experiments --data-root data/elliptic --output results/inductive/model_comparison.csv --protocol inductive
+python -m src.baseline_experiments --data-root data/elliptic --output results/ablations/model_comparison.csv --ablations --seeds 42,123,2024,2025,2026
+python -m src.baseline_experiments --data-root data/elliptic --output results/rolling/model_comparison.csv --protocol inductive --rolling-window 10
+python -m src.run_experiments --data-root data/elliptic --output-root results/taf-inductive --protocol inductive --seeds 42,123,2024,2025,2026
 ```
 
-Metrics are computed from actual predictions and include ROC-AUC, PR-AUC,
-precision, recall, F1, MCC, balanced accuracy, false-positive rate, and the
-validation-selected threshold. See [REPORT.md](REPORT.md) for the audit,
-mathematical description, research positioning, and limitations.
-Repeated-seed runs write per-seed artifacts under `results/seeds/seed_<seed>/`
-and aggregate model metrics (mean, standard deviation, and 95% confidence
-interval) into the top-level comparison and ablation CSV files. The first
-seed also retains the traditional single-seed artifact names.
+The baseline runner reports ROC-AUC, average precision (PR-AUC), precision,
+recall, F1, confusion counts, Precision@100, and validation-selected thresholds.
+ROC-AUC and PR-AUC are undefined when a period contains only one class. Five
+seeds are the default; use `--seeds 42 --epochs 2` for a smoke run. Outputs
+include per-seed and aggregate CSVs, per-period metrics, confusion matrices,
+predictions, temporal plots, feature PSI, configurations, threshold
+recalibration, and (optionally) rolling-window metrics. The `--ablations` flag
+enables GCN depth, edge, feature-width, and feature-only controls. See
+[REPORT.md](REPORT.md) for protocol details and limitations.
 
 ## Project Structure
 
@@ -99,7 +107,7 @@ bitcoin-fraud-gnn/
 │   ├── 04_gat.ipynb                # Graph Attention Network
 │   └── 05_temporal_analysis.ipynb  # Temporal generalization analysis
 ├── src/
-│   ├── models.py                   # Original reusable GCN and GAT definitions
+│   ├── models.py                   # Configurable-depth GCN and GAT definitions
 │   ├── taf_gnn.py                  # Feature, graph, temporal, and fusion model
 │   ├── temporal_model.py           # GRU/LSTM encoder
 │   ├── fusion.py                   # Adaptive softmax fusion gate
@@ -113,28 +121,36 @@ bitcoin-fraud-gnn/
 └── requirements.txt
 ```
 
-## Key Findings
+## Results policy
 
-- Graph structure carries signal invisible to tabular models (+30% recall)
-- Illicit nodes have lower average degree (0.74 vs 1.15 for licit nodes),
-  suggesting fraudulent transactions avoid highly connected hubs
-- Temporal split is critical: random split leaks future fraud patterns into training,
-  giving artificially inflated results
-- Model performance degrades on later test timesteps, pointing to continual
-  learning as a necessary next step for production fraud detection
-- The reproducible experiment runner uses train timesteps 1-28, validation
-  timesteps 29-34, and test timesteps 35-49; thresholds are selected on
-  validation data only
+No comparative metrics or research conclusions are asserted here. Generate
+results with the commands above, retain the configuration and seeds with the
+artifacts, and base conclusions on those runs. The first-94-feature ablation
+uses the first 94 model-input columns. The Elliptic study describes its first
+94 features as local features ([Weber et al., arXiv:1908.02591](https://arxiv.org/abs/1908.02591));
+this repository's processed feature matrix has 165 columns and excludes the
+explicit timestep metadata column.
 
 ## How to Run
 
-```bash
-git clone https://github.com/linovives/bitcoin-fraud-gnn.git
-cd bitcoin-fraud-gnn
+```powershell
+git clone https://github.com/SanjanaSaw/Mtech-ML-PRJ.git
+cd Mtech-ML-PRJ
 python -m venv venv
-source venv/bin/activate
+venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-jupyter lab
+```
+
+Obtain the Elliptic dataset from its official distribution and place its raw
+class, edge-list, and feature files under `data/elliptic/raw/`. The processed
+PyG graph is expected at `data/elliptic/processed/data.pt`; do not commit the
+dataset or generated model checkpoints.
+
+When using PyTorch Geometric's dataset downloader instead, initialize the
+existing dataset once from the repository root:
+
+```powershell
+python -c "from torch_geometric.datasets import EllipticBitcoinDataset; EllipticBitcoinDataset(root='data/elliptic')"
 ```
 
 ### Streamlit research interface
@@ -145,20 +161,20 @@ From the project root on Windows:
 streamlit run app.py
 ```
 
-The interface uses cached local graph data and displays only genuine generated
-artifacts when they exist. TAF-GNN predictions, ablation results, fusion
-weights, and explainability outputs remain explicit unavailable states until
-the corresponding research experiments have produced them.
+The interface uses cached local graph data and displays generated baseline
+artifacts only when the current baseline runner has produced them. Other
+research outputs remain unavailable until their corresponding experiment has
+produced them.
 
 ### Reproducible baseline experiments
 
 The common evaluation runner uses the chronological protocol shown in the UI:
 
 ```powershell
-python -m src.baseline_experiments --data-root data/elliptic --output results/model_comparison.csv
+python -m src.baseline_experiments --data-root data/elliptic --output results/baselines/model_comparison.csv --protocol transductive
+python -m src.baseline_experiments --data-root data/elliptic --output results/inductive/model_comparison.csv --protocol inductive
 ```
 
-It trains on timesteps 1-28, selects the threshold on 29-34, and reports the
-final metrics on 35-49. On Windows, keep the MKL/OpenMP settings used by
-`app.py` if PyTorch reports a `c10.dll` initialization error.
-
+Both runs train on timesteps 1–24, select checkpoints and thresholds on
+25–34, and report final metrics on 35–49. On Windows, keep the MKL/OpenMP
+settings used by `app.py` if PyTorch reports a `c10.dll` initialization error.

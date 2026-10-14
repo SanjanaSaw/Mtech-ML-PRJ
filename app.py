@@ -156,18 +156,6 @@ def empty_state(title: str, detail: str, command: str | None = None) -> None:
     st.markdown(f'<div class="empty"><b>○ &nbsp;{title}</b><br>{detail}{extra}</div>', unsafe_allow_html=True)
 
 
-def historical_comparison() -> pd.DataFrame:
-    # Values are transcribed from README.md and are intentionally labelled historical.
-    return pd.DataFrame(
-        [
-            ["Random Forest", 0.95, 0.11, 0.74],
-            ["GCN", 0.80, 0.41, 0.13],
-            ["GAT", 0.82, 0.43, 0.12],
-        ],
-        columns=["Model", "ROC-AUC", "Illicit recall", "Illicit precision"],
-    )
-
-
 def load_result(name: str) -> pd.DataFrame | None:
     path = artifact(name)
     if not path.exists():
@@ -205,7 +193,7 @@ def overview() -> None:
             pd.DataFrame(
                 {
                     "Role": ["Training", "Validation", "Testing"],
-                    "Timesteps": ["1–28", "29–34", "35–49"],
+                    "Timesteps": ["1–24", "25–34", "35–49"],
                     "Purpose": ["Fit parameters", "Select threshold", "Final report"],
                 }
             ),
@@ -249,17 +237,22 @@ def overview() -> None:
     st.subheader("Evidence at a glance")
     left, right = st.columns([1.1, 1])
     with left:
-        st.markdown("#### Historical baseline comparison")
-        st.caption("Documented in README.md; not a newly run experiment.")
-        table = historical_comparison().set_index("Model")
-        st.dataframe(table.style.format("{:.2f}"), use_container_width=True)
-        st.markdown('<div class="source">Source: README.md · original notebook protocol</div>', unsafe_allow_html=True)
+        st.markdown("#### Generated baseline comparison")
+        baseline = load_result("baselines/model_comparison.csv")
+        if baseline is None:
+            empty_state(
+                "Current baseline results are not available",
+                "Run the reproducible RF/GCN/GAT comparison to generate this table.",
+                "python -m src.baseline_experiments --data-root data/elliptic --output results/baselines/model_comparison.csv",
+            )
+        else:
+            st.dataframe(baseline, use_container_width=True, hide_index=True)
     with right:
         image = ROOT / "assets" / "class_distribution.png"
         if image.exists():
             st.image(str(image), use_container_width=True, caption="Repository class distribution reference")
     st.subheader("Research status")
-    st.caption("Baseline evidence is available from the repository; extension artifacts appear only after experiments are run.")
+    st.caption("Research metrics appear only after a reproducible experiment run has generated them.")
     status_cols = st.columns(4)
     degree = summary["degree"].numpy()
     for col, label, value in zip(
@@ -270,7 +263,7 @@ def overview() -> None:
         with col:
             metric_card(label, f"{value:.1f}" if label != "Unknown labels" else f"{int(value):,}", "Computed from graph")
     st.subheader("Train / validation / test timeline")
-    timeline = pd.DataFrame({"Split": ["Train", "Validation", "Test"], "Start": [1, 29, 35], "End": [28, 34, 49]})
+    timeline = pd.DataFrame({"Split": ["Train", "Validation", "Test"], "Start": [1, 25, 35], "End": [24, 34, 49]})
     fig = go.Figure()
     colors = {"Train": "#63e6be", "Validation": "#ffcc66", "Test": "#7aa2f7"}
     for _, row in timeline.iterrows():
@@ -279,7 +272,7 @@ def overview() -> None:
     st.plotly_chart(fig, use_container_width=True)
     st.subheader("Research guardrails")
     a, b, c = st.columns(3)
-    with a: st.markdown("**Temporal split**  \nTrain 1–28 · validation 29–34 · test 35–49")
+    with a: st.markdown("**Temporal split**  \nTrain 1–24 · validation 25–34 · test 35–49")
     with b: st.markdown("**Imbalance-aware**  \nPrioritise PR-AUC, recall, precision, and MCC over accuracy.")
     with c: st.markdown("**No invented evidence**  \nTAF-GNN views appear only after genuine output artifacts exist.")
 
@@ -410,28 +403,32 @@ def graph_explorer() -> None:
 
 def temporal_analysis() -> None:
     app_header("DRIFT MONITOR", "Temporal analysis", "Fraud prevalence and model generalisation across chronological periods.")
-    result = load_result("temporal_results.csv")
+    result = load_result("baselines/temporal_metrics.csv")
     if result is not None:
         st.dataframe(result, use_container_width=True, hide_index=True)
         numeric = result.select_dtypes("number").columns
         if len(numeric) > 1:
             st.line_chart(result.set_index(result.columns[0])[list(numeric)[:4]])
     else:
-        empty_state("Generated temporal results are not available", "The repository includes the original analysis image, but no current temporal_results.csv. The historical image below is reference material, not a fresh run.", "python -m src.run_experiments --data-root data/elliptic --output-root results")
-        image = ROOT / "assets" / "temporal_analysis.png"
-        if image.exists(): st.image(str(image), use_container_width=True, caption="Historical notebook analysis")
+        empty_state(
+            "Generated temporal results are not available",
+            "Run the reproducible RF/GCN/GAT comparison to create per-timestep metrics.",
+            "python -m src.baseline_experiments --data-root data/elliptic --output results/baselines/model_comparison.csv",
+        )
 
 
 def model_comparison() -> None:
     app_header("BENCHMARKS", "Model comparison", "Compare persisted experiment outputs without mixing them with historical notebook figures.")
-    result = load_result("model_comparison.csv")
-    source = "Generated results/model_comparison.csv"
-    if result is not None:
-        display = result.copy()
-    else:
-        display = historical_comparison()
-        source = "Historical values transcribed from README.md (no generated artifact detected)"
-    st.caption(source)
+    result = load_result("baselines/model_comparison.csv")
+    if result is None:
+        empty_state(
+            "Generated model comparison is not available",
+            "Run the reproducible baseline experiment before interpreting model metrics.",
+            "python -m src.baseline_experiments --data-root data/elliptic --output results/baselines/model_comparison.csv",
+        )
+        return
+    display = result.copy()
+    st.caption("Generated from the current baseline experiment artifacts.")
     st.dataframe(display, use_container_width=True, hide_index=True)
     numeric = [column for column in display.columns if pd.api.types.is_numeric_dtype(display[column])]
     if numeric:
